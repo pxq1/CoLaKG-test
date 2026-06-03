@@ -42,6 +42,16 @@ config['neighbor_k'] = args.neighbor_k
 config['dropout_i'] = args.dropout_i
 config['dropout_u'] = args.dropout_u
 config['dropout_n'] = args.dropout_n
+config['fusion_gate'] = args.fusion_gate
+config['gate_type'] = args.gate_type
+config['prop_norm'] = args.prop_norm
+config['graph_gamma'] = args.graph_gamma
+config['use_social'] = args.use_social
+config['social_alpha'] = args.social_alpha
+config['semantic_score_alpha'] = args.semantic_score_alpha
+config['semantic_cl_weight'] = args.semantic_cl_weight
+config['semantic_cl_tau'] = args.semantic_cl_tau
+config['pop_score_alpha'] = args.pop_score_alpha
 
 
 GPU = torch.cuda.is_available()

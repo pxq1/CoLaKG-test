@@ -26,6 +26,27 @@ def parse_args():
                         help="the dropout for user semantic embeddings")
     parser.add_argument('--dropout_n', type=float,default=0.6,
                         help="the dropout for neighbor embeddings")
+    parser.add_argument('--fusion_gate', type=int, default=0,
+                        help="use learnable gates for id/semantic and neighbor fusion")
+    parser.add_argument('--gate_type', type=str, default='scalar',
+                        choices=['scalar', 'vector'],
+                        help="gate parameterization for fusion_gate")
+    parser.add_argument('--prop_norm', type=int, default=0,
+                        help="L2-normalize embeddings before each graph propagation layer")
+    parser.add_argument('--graph_gamma', type=float, default=-1.0,
+                        help="if >= 0, use gamma * ego + (1 - gamma) * propagated layer aggregation")
+    parser.add_argument('--use_social', type=int, default=0,
+                        help="use available user-user social graph for user representation smoothing")
+    parser.add_argument('--social_alpha', type=float, default=0.1,
+                        help="residual weight for social user smoothing")
+    parser.add_argument('--semantic_score_alpha', type=float, default=0.0,
+                        help="weight of the semantic residual scoring head")
+    parser.add_argument('--semantic_cl_weight', type=float, default=0.0,
+                        help="weight of semantic collaborative contrastive alignment loss")
+    parser.add_argument('--semantic_cl_tau', type=float, default=0.2,
+                        help="temperature for semantic collaborative contrastive alignment")
+    parser.add_argument('--pop_score_alpha', type=float, default=0.0,
+                        help="weight of train-set item popularity prior in ranking scores")
     parser.add_argument('--a_fold', type=int,default=100,
                         help="the fold num used to split large adj matrix")
     parser.add_argument('--testbatch', type=int,default=100,

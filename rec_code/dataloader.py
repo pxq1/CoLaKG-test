@@ -268,6 +268,7 @@ class Loader(BasicDataset):
         self.testItem = np.array(testItem)
         
         self.Graph = None
+        self.SocialGraph = None
         print(f"{self.trainDataSize} interactions for training")
         print(f"{self.testDataSize} interactions for testing")
         print(f"{world.dataset} Sparsity : {(self.trainDataSize + self.testDataSize) / self.n_users / self.m_items}")
@@ -362,6 +363,51 @@ class Loader(BasicDataset):
                 self.Graph = self.Graph.coalesce().to(world.device)
                 print("don't split the matrix")
         return self.Graph
+
+    def getSocialGraph(self):
+        if self.SocialGraph is not None:
+            return self.SocialGraph
+
+        friends_file = join(self.path, 'user_friends.dat')
+        user_map_file = join(self.path, 'user_map.txt')
+        if not os.path.exists(friends_file) or not os.path.exists(user_map_file):
+            self.SocialGraph = None
+            return None
+
+        raw_to_inner = {}
+        with open(user_map_file) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                    raw_to_inner[int(parts[0])] = int(parts[1])
+
+        rows, cols = [], []
+        with open(friends_file) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                    continue
+                u = raw_to_inner.get(int(parts[0]))
+                v = raw_to_inner.get(int(parts[1]))
+                if u is None or v is None or u >= self.n_users or v >= self.n_users or u == v:
+                    continue
+                rows.extend([u, v])
+                cols.extend([v, u])
+
+        if not rows:
+            self.SocialGraph = None
+            return None
+
+        social = sp.coo_matrix((np.ones(len(rows), dtype=np.float32), (rows, cols)),
+                               shape=(self.n_users, self.n_users)).tocsr()
+        social.data[:] = 1.0
+        rowsum = np.array(social.sum(axis=1)).flatten()
+        d_inv_sqrt = np.power(rowsum, -0.5)
+        d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+        norm_social = sp.diags(d_inv_sqrt).dot(social).dot(sp.diags(d_inv_sqrt)).tocsr()
+        self.SocialGraph = self._convert_sp_mat_to_sp_tensor(norm_social).coalesce().to(world.device)
+        print(f"loaded social graph with {len(rows) // 2} mapped friendship edges")
+        return self.SocialGraph
 
     def __build_test(self):
         """

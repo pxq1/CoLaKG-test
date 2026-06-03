@@ -228,6 +228,16 @@ class CoLaKG(BasicModel):
         self.dropout_i = self.config['dropout_i']
         self.dropout_u = self.config['dropout_u']
         self.dropout_neighbor = self.config['dropout_n']
+        self.use_fusion_gate = bool(self.config.get('fusion_gate', 0))
+        self.gate_type = self.config.get('gate_type', 'scalar')
+        self.prop_norm = bool(self.config.get('prop_norm', 0))
+        self.graph_gamma = self.config.get('graph_gamma', -1.0)
+        self.use_social = bool(self.config.get('use_social', 0))
+        self.social_alpha = self.config.get('social_alpha', 0.1)
+        self.semantic_score_alpha = self.config.get('semantic_score_alpha', 0.0)
+        self.semantic_cl_weight = self.config.get('semantic_cl_weight', 0.0)
+        self.semantic_cl_tau = self.config.get('semantic_cl_tau', 0.2)
+        self.pop_score_alpha = self.config.get('pop_score_alpha', 0.0)
         self.__init_weight()
 
     def __init_weight(self):
@@ -249,8 +259,13 @@ class CoLaKG(BasicModel):
    
         self.f = nn.Sigmoid()
         self.Graph = self.dataset.getSparseGraph()
+        self.SocialGraph = self.dataset.getSocialGraph() if self.use_social and hasattr(self.dataset, 'getSocialGraph') else None
         self.semantic_map = nn.Linear(1024, self.latent_dim)
         self.user_semantic_map = nn.Linear(1024, self.latent_dim)
+        item_popularity = np.bincount(self.dataset.trainItem, minlength=self.num_items).astype(np.float32)
+        item_popularity = np.log1p(item_popularity)
+        item_popularity = (item_popularity - item_popularity.mean()) / (item_popularity.std() + 1e-8)
+        self.register_buffer('item_popularity_prior', torch.from_numpy(item_popularity))
         print(f"lgn is already to go(drop_edge:{self.config['use_drop_edge']})")
         self.W = nn.Parameter(torch.empty(size=(1024, 32)))
         nn.init.xavier_uniform_(self.W.data, gain=1.414)
@@ -261,6 +276,10 @@ class CoLaKG(BasicModel):
         nn.init.xavier_uniform_(self.W_u.data, gain=1.414)
         self.a_u = nn.Parameter(torch.empty(size=(2*32, 1)))
         nn.init.xavier_uniform_(self.a_u.data, gain=1.414)
+        gate_shape = (self.latent_dim,) if self.gate_type == 'vector' else (1,)
+        self.item_semantic_gate = nn.Parameter(torch.zeros(gate_shape))
+        self.user_semantic_gate = nn.Parameter(torch.zeros(gate_shape))
+        self.neighbor_fusion_gate = nn.Parameter(torch.zeros(gate_shape))
         self.alpha=0.2
         self.leakyrelu = nn.LeakyReLU(self.alpha)
 
@@ -296,13 +315,25 @@ class CoLaKG(BasicModel):
         items_semantic_emb = self.semantic_map(items_semantic_emb)
         items_semantic_emb = F.elu(items_semantic_emb)
         items_semantic_emb = F.dropout(items_semantic_emb, self.dropout_i, training=self.training)
-        items_emb_merged = (items_emb + items_semantic_emb) / 2
+        if self.use_fusion_gate:
+            item_semantic_weight = torch.sigmoid(self.item_semantic_gate)
+            items_emb_merged = (1 - item_semantic_weight) * items_emb + item_semantic_weight * items_semantic_emb
+        else:
+            items_emb_merged = (items_emb + items_semantic_emb) / 2
         
         user_semantic_emb = F.dropout(self.user_semantic_emb, self.dropout_u, training=self.training)
         user_semantic_emb = self.user_semantic_map(user_semantic_emb)
         user_semantic_emb = F.elu(user_semantic_emb)
         user_semantic_emb = F.dropout(user_semantic_emb, self.dropout_u, training=self.training)
-        users_emb_merged = (users_emb + user_semantic_emb) / 2
+        if self.use_fusion_gate:
+            user_semantic_weight = torch.sigmoid(self.user_semantic_gate)
+            users_emb_merged = (1 - user_semantic_weight) * users_emb + user_semantic_weight * user_semantic_emb
+        else:
+            users_emb_merged = (users_emb + user_semantic_emb) / 2
+
+        if self.SocialGraph is not None and self.social_alpha > 0:
+            social_users_emb = torch.sparse.mm(self.SocialGraph, users_emb_merged)
+            users_emb_merged = (1 - self.social_alpha) * users_emb_merged + self.social_alpha * social_users_emb
         
         
         neighbor_emb = items_emb_merged[self.adj_matrix]
@@ -332,7 +363,11 @@ class CoLaKG(BasicModel):
         h_prime = F.elu(h_prime)
       
 
-        items_emb_merged = (items_emb_merged + h_prime ) / 2
+        if self.use_fusion_gate:
+            neighbor_weight = torch.sigmoid(self.neighbor_fusion_gate)
+            items_emb_merged = (1 - neighbor_weight) * items_emb_merged + neighbor_weight * h_prime
+        else:
+            items_emb_merged = (items_emb_merged + h_prime ) / 2
         
         # items_emb = F.elu(items_emb)
        
@@ -349,6 +384,8 @@ class CoLaKG(BasicModel):
             g_droped = self.Graph    
         
         for layer in range(self.n_layers):
+            if self.prop_norm:
+                all_emb = F.normalize(all_emb, p=2, dim=1)
             if self.A_split:
                 temp_emb = []
                 for f in range(len(g_droped)):
@@ -358,9 +395,13 @@ class CoLaKG(BasicModel):
             else:
                 all_emb = torch.sparse.mm(g_droped, all_emb)
             embs.append(all_emb)
-        embs = torch.stack(embs, dim=1)
-        #print(embs.size())
-        light_out = torch.mean(embs, dim=1)
+        if self.graph_gamma >= 0 and len(embs) > 1:
+            prop_emb = torch.mean(torch.stack(embs[1:], dim=1), dim=1)
+            light_out = self.graph_gamma * embs[0] + (1 - self.graph_gamma) * prop_emb
+        else:
+            embs = torch.stack(embs, dim=1)
+            #print(embs.size())
+            light_out = torch.mean(embs, dim=1)
         users, items = torch.split(light_out, [self.num_users, self.num_items])
         return users, items
     
@@ -368,7 +409,14 @@ class CoLaKG(BasicModel):
         all_users, all_items = self.computer()
         users_emb = all_users[users.long()]
         items_emb = all_items
-        rating = self.f(torch.matmul(users_emb, items_emb.t()))
+        scores = torch.matmul(users_emb, items_emb.t())
+        if self.semantic_score_alpha > 0:
+            semantic_users = F.normalize(F.elu(self.user_semantic_map(self.user_semantic_emb))[users.long()], p=2, dim=1)
+            semantic_items = F.normalize(F.elu(self.semantic_map(self.semantic_emb)), p=2, dim=1)
+            scores = scores + self.semantic_score_alpha * torch.matmul(semantic_users, semantic_items.t())
+        if self.pop_score_alpha != 0:
+            scores = scores + self.pop_score_alpha * self.item_popularity_prior.unsqueeze(0)
+        rating = self.f(scores)
         return rating
 
     def getEmbedding(self, users, pos_items, neg_items):
@@ -384,6 +432,13 @@ class CoLaKG(BasicModel):
         pos_emb_ego0 = self.semantic_map(self.semantic_emb)[pos_items]
         neg_emb_ego0 = self.semantic_map(self.semantic_emb)[neg_items]
         return users_emb, pos_emb, neg_emb, users_emb_ego, pos_emb_ego, neg_emb_ego, pos_emb_ego0, neg_emb_ego0, users_emb_ego0
+
+    def semantic_cl_loss(self, rec_emb, semantic_emb):
+        rec_emb = F.normalize(rec_emb, p=2, dim=1)
+        semantic_emb = F.normalize(F.elu(semantic_emb), p=2, dim=1)
+        logits = torch.matmul(rec_emb, semantic_emb.t()) / self.semantic_cl_tau
+        labels = torch.arange(logits.size(0), device=logits.device)
+        return F.cross_entropy(logits, labels)
     
     def bpr_loss(self, users, pos, neg):
         (users_emb, pos_emb, neg_emb, 
@@ -399,8 +454,21 @@ class CoLaKG(BasicModel):
         pos_scores = torch.sum(pos_scores, dim=1)
         neg_scores = torch.mul(users_emb, neg_emb)
         neg_scores = torch.sum(neg_scores, dim=1)
+        if self.semantic_score_alpha > 0:
+            semantic_users = F.normalize(F.elu(users_emb_ego0), p=2, dim=1)
+            semantic_pos = F.normalize(F.elu(pos_emb_ego0), p=2, dim=1)
+            semantic_neg = F.normalize(F.elu(neg_emb_ego0), p=2, dim=1)
+            pos_scores = pos_scores + self.semantic_score_alpha * torch.sum(semantic_users * semantic_pos, dim=1)
+            neg_scores = neg_scores + self.semantic_score_alpha * torch.sum(semantic_users * semantic_neg, dim=1)
+        if self.pop_score_alpha != 0:
+            pos_scores = pos_scores + self.pop_score_alpha * self.item_popularity_prior[pos.long()]
+            neg_scores = neg_scores + self.pop_score_alpha * self.item_popularity_prior[neg.long()]
         
         loss = torch.mean(torch.nn.functional.softplus(neg_scores - pos_scores))
+        if self.semantic_cl_weight > 0:
+            cl_loss = self.semantic_cl_loss(users_emb, users_emb_ego0)
+            cl_loss = cl_loss + self.semantic_cl_loss(pos_emb, pos_emb_ego0)
+            loss = loss + self.semantic_cl_weight * cl_loss
         
         return loss, reg_loss
        

@@ -1,0 +1,57 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Notebook/runtime noise
+.ipynb_checkpoints/
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.*
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
+*.temp
+
+# Datasets and generated preprocessing artifacts
+data/
+*.npy
+*.npz
+
+# Model checkpoints and binary weights
+code/checkpoints/
+checkpoints/
+*.pt
+*.pth
+*.pth.tar
+*.ckpt
+*.bin
+
+# Experiment tracking outputs
+code/runs/
+runs/
+wandb/
+outputs/
+results/
+
+# Generated C++ extension artifacts
+rec_code/sources/.rendered.*

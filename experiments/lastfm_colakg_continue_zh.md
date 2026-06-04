@@ -371,3 +371,97 @@ eval-only 扫描结果：
 - `NDCG@20=0.35257296`
 
 下一步更值得集中尝试的是 query-aware / user-adaptive 的语义邻居扩散：不再用全局固定 `alpha`，而是根据用户语义表征、item 语义置信度或模型打分不确定性动态控制扩散强度。
+
+## 追加实验：用户自适应语义扩散门控与邻居分数标准化
+
+日期：2026-06-04
+
+### 14. query-aware / adaptive semantic diffusion gate
+
+动机：
+
+- 参考近两年推荐系统中“自适应去噪、语义过滤、图语义对齐”的思路，将上一轮有效的固定语义邻居分数扩散从全局 `alpha` 改为可按用户-物品或 item 语义邻域置信度动态缩放。
+- 核心假设是：语义邻居扩散在部分用户-物品对上可靠，但在语义噪声较高的位置会带来误扩散，因此需要 gate 做轻量去噪。
+
+改动：
+
+- 新增 `neighbor_gate_type`，支持：
+  - `raw_semantic`：用原始用户语义向量和 item 语义向量 cosine 作为 query-aware gate。
+  - `mapped_semantic`：用模型内部语义映射后的向量作为 gate。
+  - `uncertainty`：对模型原始分数绝对值较小的位置给更高扩散权重。
+  - `item_coherence`：根据 item 与其语义邻居的一致性控制扩散强度。
+- 新增 `neighbor_gate_beta`、`neighbor_gate_center`、`neighbor_gate_min` 控制 gate 曲线。
+- 默认 `neighbor_gate_type=none`，不会影响原有最佳配置。
+
+300 epoch 探针：
+
+| 配置 | 训练轮数 | 最佳 epoch | NDCG@20 | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| `raw_semantic`, `alpha=0.05`, `beta=5`, `gate_min=0.5` | 300 | 296 | `0.33603728` | 与固定扩散几乎持平，没有明显收益 |
+| `item_coherence`, `alpha=0.05`, `beta=2`, `gate_min=0.5` | 300 | 296 | `0.33635405` | 略高于同阶段固定扩散约 `+0.00030`，但信号很弱 |
+
+300 epoch checkpoint 上 eval-only 扫描：
+
+| 配置 | NDCG@20 |
+| --- | ---: |
+| `raw_semantic`, `alpha=0.09`, `beta=2`, `gate_min=0.5` | `0.33263127` |
+| `raw_semantic`, `alpha=0.12`, `beta=2`, `gate_min=0.5` | `0.33236779` |
+| 固定扩散 `alpha=0.12` | `0.33236378` |
+| 固定扩散 `alpha=0.07` | `0.33229708` |
+
+完整 1000 epoch：
+
+| 配置 | 最佳 epoch | Precision@10/20 | Recall@10/20 | NDCG@10/20 | 结论 |
+| --- | ---: | --- | --- | --- | --- |
+| `raw_semantic`, `alpha=0.09`, `beta=2`, `gate_min=0.5` | 951 | `[0.20322754, 0.14158150]` | `[0.27586473, 0.38437930]` | `[0.29924287, 0.35251494]` | 非常接近当前最佳，但没有超过 `0.35257296` |
+
+结论：query-aware gate 的直觉是合理的，但在 LastFM 当前语义向量质量下，gate 带来的排序扰动很小，甚至会轻微削弱已经有效的固定语义扩散。当前不能作为新的最佳配置。
+
+### 15. 语义邻居分数组件标准化 / RRF 排序融合
+
+动机：
+
+- 固定语义邻居扩散直接把邻居平均分数加到原始 dot score 上，可能受到用户内分数尺度影响。
+- 尝试对邻居分数组件做用户内标准化，或转换成 reciprocal rank fusion 风格的排序信号，再与主分数融合。
+
+改动：
+
+- 新增 `neighbor_score_norm`：
+  - `user_zscore`
+  - `user_minmax`
+  - `rrf`
+  - `none`
+- 新增 `neighbor_rrf_k`。
+- 默认 `neighbor_score_norm=none`，保持原始行为。
+
+在当前 1000 epoch 末尾 checkpoint 上 eval-only 扫描结果：
+
+| 配置 | NDCG@20 |
+| --- | ---: |
+| `neighbor_score_norm=rrf`, `alpha=0.20` | `0.35011031` |
+| `neighbor_score_norm=rrf`, `alpha=0.50` | `0.35009595` |
+| `neighbor_score_norm=user_minmax`, `alpha=0.01` | `0.35008344` |
+| 固定扩散 `alpha=0.01` | `0.34989161` |
+
+结论：RRF / min-max 在该 checkpoint 上有小幅收益，但仍低于历史最佳 `0.35257296`。这说明排序归一化可以作为后续组合模块保留，但单独使用无法达成 4%-5% 提升。
+
+### 本轮小结
+
+本轮实现并测试了：
+
+- 用户自适应语义扩散 gate。
+- item 语义邻域一致性 gate。
+- 不确定性 gate。
+- 用户内 z-score / min-max 标准化。
+- RRF 风格邻居排序融合。
+
+目前最佳仍为上一轮固定语义邻居扩散：
+
+- `recdim=256`
+- `layer=3`
+- `dropout_i/dropout_u/dropout_n=0.4/0.2/0.4`
+- `neighbor_score_alpha=0.05`
+- `neighbor_score_steps=1`
+- `NDCG@20=0.35257296`
+
+本轮没有刷新最佳结果，但新增的自适应 gate 与分数标准化模块已经以默认关闭方式保留，后续可继续与验证集选择、checkpoint ensemble 或更强训练侧语义对齐模块组合探索。

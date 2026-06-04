@@ -242,6 +242,12 @@ class CoLaKG(BasicModel):
         self.neighbor_score_alpha = self.config.get('neighbor_score_alpha', 0.0)
         self.neighbor_score_steps = max(int(self.config.get('neighbor_score_steps', 1)), 1)
         self.neighbor_score_mutual = bool(self.config.get('neighbor_score_mutual', 0))
+        self.neighbor_gate_type = self.config.get('neighbor_gate_type', 'none')
+        self.neighbor_gate_beta = self.config.get('neighbor_gate_beta', 5.0)
+        self.neighbor_gate_center = self.config.get('neighbor_gate_center', 0.0)
+        self.neighbor_gate_min = min(max(self.config.get('neighbor_gate_min', 0.0), 0.0), 1.0)
+        self.neighbor_score_norm = self.config.get('neighbor_score_norm', 'none')
+        self.neighbor_rrf_k = max(float(self.config.get('neighbor_rrf_k', 60.0)), 1.0)
         self.neighbor_train_alpha = self.config.get('neighbor_train_alpha', 0.0)
         self.cf_score_alpha = self.config.get('cf_score_alpha', 0.0)
         self.cf_neighbor_k = max(int(self.config.get('cf_neighbor_k', 20)), 1)
@@ -292,6 +298,7 @@ class CoLaKG(BasicModel):
                 train_pos_mask[user, torch.as_tensor(positives, dtype=torch.long)] = True
         self.register_buffer('train_pos_mask', train_pos_mask)
         self.register_buffer('semantic_mutual_mask', self.build_semantic_mutual_mask(), persistent=False)
+        self.register_buffer('semantic_neighbor_coherence', self.build_semantic_neighbor_coherence(), persistent=False)
         self.register_buffer('cf_adj_matrix', self.build_cf_adj_matrix(), persistent=False)
         print(f"lgn is already to go(drop_edge:{self.config['use_drop_edge']})")
         self.W = nn.Parameter(torch.empty(size=(1024, 32)))
@@ -331,6 +338,63 @@ class CoLaKG(BasicModel):
         plain_scores = torch.mean(selected_scores, dim=2)
         has_mutual = torch.sum(mask, dim=2) > 0
         return torch.where(has_mutual, masked_scores, plain_scores)
+
+    def build_semantic_neighbor_coherence(self):
+        semantic_items = F.normalize(self.semantic_emb.detach().cpu(), p=2, dim=1)
+        neighbor_semantic = semantic_items[self.adj_matrix.cpu()]
+        center_semantic = semantic_items.unsqueeze(1)
+        coherence = torch.mean(torch.sum(center_semantic * neighbor_semantic, dim=2), dim=1)
+        coherence = (coherence - coherence.mean()) / (coherence.std() + 1e-8)
+        return coherence.float()
+
+    def get_neighbor_score_gate(self, users, scores):
+        gate_type = self.neighbor_gate_type
+        if gate_type == 'none':
+            return None
+        beta = float(self.neighbor_gate_beta)
+        center = float(self.neighbor_gate_center)
+        if gate_type == 'raw_semantic':
+            semantic_users = F.normalize(self.user_semantic_emb[users.long()], p=2, dim=1)
+            semantic_items = F.normalize(self.semantic_emb, p=2, dim=1)
+            gate_input = torch.matmul(semantic_users, semantic_items.t())
+        elif gate_type == 'mapped_semantic':
+            semantic_users = F.normalize(F.elu(self.user_semantic_map(self.user_semantic_emb))[users.long()], p=2, dim=1)
+            semantic_items = F.normalize(F.elu(self.semantic_map(self.semantic_emb)), p=2, dim=1)
+            gate_input = torch.matmul(semantic_users, semantic_items.t())
+        elif gate_type == 'uncertainty':
+            gate_input = -torch.abs(scores.detach())
+        elif gate_type == 'item_coherence':
+            gate_input = self.semantic_neighbor_coherence.unsqueeze(0)
+        else:
+            return None
+        gate = torch.sigmoid(beta * (gate_input - center))
+        if self.neighbor_gate_min > 0:
+            gate = self.neighbor_gate_min + (1 - self.neighbor_gate_min) * gate
+        return gate
+
+    def normalize_neighbor_scores(self, neighbor_scores):
+        norm_type = self.neighbor_score_norm
+        if norm_type == 'none':
+            return neighbor_scores
+        if norm_type == 'user_zscore':
+            mean = torch.mean(neighbor_scores, dim=1, keepdim=True)
+            std = torch.std(neighbor_scores, dim=1, keepdim=True).clamp_min(1e-8)
+            return (neighbor_scores - mean) / std
+        if norm_type == 'user_minmax':
+            min_score = torch.min(neighbor_scores, dim=1, keepdim=True).values
+            max_score = torch.max(neighbor_scores, dim=1, keepdim=True).values
+            return (neighbor_scores - min_score) / (max_score - min_score).clamp_min(1e-8)
+        if norm_type == 'rrf':
+            order = torch.argsort(neighbor_scores, dim=1, descending=True)
+            ranks = torch.empty_like(order, dtype=torch.float32)
+            rank_values = torch.arange(
+                neighbor_scores.size(1),
+                device=neighbor_scores.device,
+                dtype=torch.float32,
+            ).unsqueeze(0).expand_as(ranks)
+            ranks.scatter_(1, order, rank_values)
+            return 1.0 / (self.neighbor_rrf_k + ranks + 1.0)
+        return neighbor_scores
 
     def build_cf_adj_matrix(self):
         if self.cf_score_alpha == 0 or not hasattr(self.dataset, 'trainUser') or not hasattr(self.dataset, 'trainItem'):
@@ -476,6 +540,10 @@ class CoLaKG(BasicModel):
             mutual_mask = self.semantic_mutual_mask if self.neighbor_score_mutual else None
             for _ in range(self.neighbor_score_steps):
                 neighbor_scores = self.aggregate_neighbor_scores(neighbor_scores, self.adj_matrix, mutual_mask)
+            neighbor_gate = self.get_neighbor_score_gate(users.long(), scores)
+            if neighbor_gate is not None:
+                neighbor_scores = neighbor_scores * neighbor_gate
+            neighbor_scores = self.normalize_neighbor_scores(neighbor_scores)
             scores = scores + self.neighbor_score_alpha * neighbor_scores
         if self.cf_score_alpha != 0:
             cf_neighbor_scores = torch.mean(scores[:, self.cf_adj_matrix], dim=2)

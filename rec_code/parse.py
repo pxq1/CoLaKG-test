@@ -55,6 +55,20 @@ def parse_args():
                         help="number of semantic-neighbor diffusion steps for ranking scores")
     parser.add_argument('--neighbor_score_mutual', type=int, default=0,
                         help="use only mutual semantic nearest neighbors for score diffusion")
+    parser.add_argument('--neighbor_gate_type', type=str, default='none',
+                        choices=['none', 'raw_semantic', 'mapped_semantic', 'uncertainty', 'item_coherence'],
+                        help="query-aware gate for semantic item-neighbor score diffusion")
+    parser.add_argument('--neighbor_gate_beta', type=float, default=5.0,
+                        help="sharpness of the semantic-neighbor score gate")
+    parser.add_argument('--neighbor_gate_center', type=float, default=0.0,
+                        help="center value of the semantic-neighbor score gate")
+    parser.add_argument('--neighbor_gate_min', type=float, default=0.0,
+                        help="lower bound of the semantic-neighbor score gate")
+    parser.add_argument('--neighbor_score_norm', type=str, default='none',
+                        choices=['none', 'user_zscore', 'user_minmax', 'rrf'],
+                        help="normalization applied to semantic-neighbor diffusion scores before fusion")
+    parser.add_argument('--neighbor_rrf_k', type=float, default=60.0,
+                        help="rank constant for reciprocal-rank neighbor score normalization")
     parser.add_argument('--neighbor_train_alpha', type=float, default=0.0,
                         help="weight of semantic-neighbor item embeddings in BPR positive/negative scores")
     parser.add_argument('--cf_score_alpha', type=float, default=0.0,

@@ -16,16 +16,47 @@ from sklearn.metrics import roc_auc_score
 CORES = multiprocessing.cpu_count() // 2
 
 
+def _use_hard_negative(epoch):
+    hard_neg_k = world.config.get('hard_neg_k', 1)
+    if hard_neg_k <= 1:
+        return False
+    start_epoch = world.config.get('hard_neg_start_epoch', 0)
+    stop_epoch = world.config.get('hard_neg_stop_epoch', -1)
+    if epoch < start_epoch:
+        return False
+    if stop_epoch >= 0 and epoch >= stop_epoch:
+        return False
+    return True
+
+
+def _select_hard_negatives(Recmodel, users, candidate_negs):
+    if candidate_negs.dim() == 1:
+        return candidate_negs
+    with torch.no_grad():
+        all_users, all_items = Recmodel.computer()
+        users_emb = all_users[users.long()]
+        negs_emb = all_items[candidate_negs.long()]
+        scores = torch.sum(users_emb.unsqueeze(1) * negs_emb, dim=-1)
+        hard_index = torch.argmax(scores, dim=1, keepdim=True)
+    return torch.gather(candidate_negs, 1, hard_index).squeeze(1)
+
+
 def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=None):
     Recmodel = recommend_model
     Recmodel.train()
+    Recmodel.current_epoch = epoch
     bpr: utils.BPRLoss = loss_class
+    hard_negative = _use_hard_negative(epoch)
+    neg_ratio = world.config.get('hard_neg_k', 1) if hard_negative else 1
     
     with timer(name="Sample"):
-        S = utils.UniformSample_original(dataset)
+        S = utils.UniformSample_original(dataset, neg_ratio=neg_ratio)
     users = torch.Tensor(S[:, 0]).long()
     posItems = torch.Tensor(S[:, 1]).long()
-    negItems = torch.Tensor(S[:, 2]).long()
+    if hard_negative:
+        negItems = torch.Tensor(S[:, 2:]).long()
+    else:
+        negItems = torch.Tensor(S[:, 2]).long()
 
     users = users.to(world.device)
     posItems = posItems.to(world.device)
@@ -39,9 +70,10 @@ def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=N
          (batch_users,
           batch_pos,
           batch_neg)) in enumerate(utils.minibatch(users,
-                                                   posItems,
+                                                  posItems,
                                                    negItems,
                                                    batch_size=world.config['bpr_batch_size'])):
+        batch_neg = _select_hard_negatives(Recmodel, batch_users, batch_neg)
         cri = bpr.stageOne(batch_users, batch_pos, batch_neg)
         aver_loss += cri
         if world.tensorboard:

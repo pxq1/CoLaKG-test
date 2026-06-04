@@ -235,9 +235,17 @@ class CoLaKG(BasicModel):
         self.use_social = bool(self.config.get('use_social', 0))
         self.social_alpha = self.config.get('social_alpha', 0.1)
         self.semantic_score_alpha = self.config.get('semantic_score_alpha', 0.0)
+        self.raw_semantic_score_alpha = self.config.get('raw_semantic_score_alpha', 0.0)
         self.semantic_cl_weight = self.config.get('semantic_cl_weight', 0.0)
         self.semantic_cl_tau = self.config.get('semantic_cl_tau', 0.2)
         self.pop_score_alpha = self.config.get('pop_score_alpha', 0.0)
+        self.neighbor_score_alpha = self.config.get('neighbor_score_alpha', 0.0)
+        self.simgcl_weight = self.config.get('simgcl_weight', 0.0)
+        self.simgcl_tau = self.config.get('simgcl_tau', 0.2)
+        self.simgcl_eps = self.config.get('simgcl_eps', 0.1)
+        self.simgcl_start_epoch = self.config.get('simgcl_start_epoch', 0)
+        self.simgcl_stop_epoch = self.config.get('simgcl_stop_epoch', -1)
+        self.current_epoch = 0
         self.__init_weight()
 
     def __init_weight(self):
@@ -304,7 +312,7 @@ class CoLaKG(BasicModel):
             graph = self.__dropout_x(self.Graph, keep_prob)
         return graph
     
-    def computer(self):
+    def computer(self, perturbed=False):
         """
         propagate methods for lightGCN
         """       
@@ -394,6 +402,9 @@ class CoLaKG(BasicModel):
                 all_emb = side_emb
             else:
                 all_emb = torch.sparse.mm(g_droped, all_emb)
+            if perturbed and self.simgcl_eps > 0:
+                random_noise = torch.rand_like(all_emb)
+                all_emb = all_emb + torch.sign(all_emb) * F.normalize(random_noise, p=2, dim=1) * self.simgcl_eps
             embs.append(all_emb)
         if self.graph_gamma >= 0 and len(embs) > 1:
             prop_emb = torch.mean(torch.stack(embs[1:], dim=1), dim=1)
@@ -410,10 +421,17 @@ class CoLaKG(BasicModel):
         users_emb = all_users[users.long()]
         items_emb = all_items
         scores = torch.matmul(users_emb, items_emb.t())
+        if self.neighbor_score_alpha != 0:
+            neighbor_scores = torch.mean(scores[:, self.adj_matrix], dim=2)
+            scores = scores + self.neighbor_score_alpha * neighbor_scores
         if self.semantic_score_alpha > 0:
             semantic_users = F.normalize(F.elu(self.user_semantic_map(self.user_semantic_emb))[users.long()], p=2, dim=1)
             semantic_items = F.normalize(F.elu(self.semantic_map(self.semantic_emb)), p=2, dim=1)
             scores = scores + self.semantic_score_alpha * torch.matmul(semantic_users, semantic_items.t())
+        if self.raw_semantic_score_alpha != 0:
+            raw_semantic_users = F.normalize(self.user_semantic_emb[users.long()], p=2, dim=1)
+            raw_semantic_items = F.normalize(self.semantic_emb, p=2, dim=1)
+            scores = scores + self.raw_semantic_score_alpha * torch.matmul(raw_semantic_users, raw_semantic_items.t())
         if self.pop_score_alpha != 0:
             scores = scores + self.pop_score_alpha * self.item_popularity_prior.unsqueeze(0)
         rating = self.f(scores)
@@ -439,6 +457,24 @@ class CoLaKG(BasicModel):
         logits = torch.matmul(rec_emb, semantic_emb.t()) / self.semantic_cl_tau
         labels = torch.arange(logits.size(0), device=logits.device)
         return F.cross_entropy(logits, labels)
+
+    def simgcl_cl_loss(self, view1, view2, ids):
+        ids = torch.unique(ids.long())
+        view1 = F.normalize(view1[ids], p=2, dim=1)
+        view2 = F.normalize(view2[ids], p=2, dim=1)
+        logits = torch.matmul(view1, view2.t()) / self.simgcl_tau
+        labels = torch.arange(logits.size(0), device=logits.device)
+        return F.cross_entropy(logits, labels)
+
+    def get_simgcl_weight(self):
+        if self.simgcl_weight <= 0:
+            return 0.0
+        epoch = getattr(self, 'current_epoch', 0)
+        if epoch < self.simgcl_start_epoch:
+            return 0.0
+        if self.simgcl_stop_epoch >= 0 and epoch >= self.simgcl_stop_epoch:
+            return 0.0
+        return self.simgcl_weight
     
     def bpr_loss(self, users, pos, neg):
         (users_emb, pos_emb, neg_emb, 
@@ -460,6 +496,12 @@ class CoLaKG(BasicModel):
             semantic_neg = F.normalize(F.elu(neg_emb_ego0), p=2, dim=1)
             pos_scores = pos_scores + self.semantic_score_alpha * torch.sum(semantic_users * semantic_pos, dim=1)
             neg_scores = neg_scores + self.semantic_score_alpha * torch.sum(semantic_users * semantic_neg, dim=1)
+        if self.raw_semantic_score_alpha != 0:
+            raw_semantic_users = F.normalize(self.user_semantic_emb[users.long()], p=2, dim=1)
+            raw_semantic_pos = F.normalize(self.semantic_emb[pos.long()], p=2, dim=1)
+            raw_semantic_neg = F.normalize(self.semantic_emb[neg.long()], p=2, dim=1)
+            pos_scores = pos_scores + self.raw_semantic_score_alpha * torch.sum(raw_semantic_users * raw_semantic_pos, dim=1)
+            neg_scores = neg_scores + self.raw_semantic_score_alpha * torch.sum(raw_semantic_users * raw_semantic_neg, dim=1)
         if self.pop_score_alpha != 0:
             pos_scores = pos_scores + self.pop_score_alpha * self.item_popularity_prior[pos.long()]
             neg_scores = neg_scores + self.pop_score_alpha * self.item_popularity_prior[neg.long()]
@@ -469,6 +511,13 @@ class CoLaKG(BasicModel):
             cl_loss = self.semantic_cl_loss(users_emb, users_emb_ego0)
             cl_loss = cl_loss + self.semantic_cl_loss(pos_emb, pos_emb_ego0)
             loss = loss + self.semantic_cl_weight * cl_loss
+        active_simgcl_weight = self.get_simgcl_weight()
+        if active_simgcl_weight > 0:
+            users_view1, items_view1 = self.computer(perturbed=True)
+            users_view2, items_view2 = self.computer(perturbed=True)
+            cl_loss = self.simgcl_cl_loss(users_view1, users_view2, users)
+            cl_loss = cl_loss + self.simgcl_cl_loss(items_view1, items_view2, pos)
+            loss = loss + active_simgcl_weight * cl_loss
         
         return loss, reg_loss
        

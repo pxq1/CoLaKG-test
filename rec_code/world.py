@@ -49,9 +49,19 @@ config['graph_gamma'] = args.graph_gamma
 config['use_social'] = args.use_social
 config['social_alpha'] = args.social_alpha
 config['semantic_score_alpha'] = args.semantic_score_alpha
+config['raw_semantic_score_alpha'] = args.raw_semantic_score_alpha
 config['semantic_cl_weight'] = args.semantic_cl_weight
 config['semantic_cl_tau'] = args.semantic_cl_tau
 config['pop_score_alpha'] = args.pop_score_alpha
+config['neighbor_score_alpha'] = args.neighbor_score_alpha
+config['simgcl_weight'] = args.simgcl_weight
+config['simgcl_tau'] = args.simgcl_tau
+config['simgcl_eps'] = args.simgcl_eps
+config['simgcl_start_epoch'] = args.simgcl_start_epoch
+config['simgcl_stop_epoch'] = args.simgcl_stop_epoch
+config['hard_neg_k'] = args.hard_neg_k
+config['hard_neg_start_epoch'] = args.hard_neg_start_epoch
+config['hard_neg_stop_epoch'] = args.hard_neg_stop_epoch
 
 
 GPU = torch.cuda.is_available()

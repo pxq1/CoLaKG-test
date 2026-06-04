@@ -41,12 +41,32 @@ def parse_args():
                         help="residual weight for social user smoothing")
     parser.add_argument('--semantic_score_alpha', type=float, default=0.0,
                         help="weight of the semantic residual scoring head")
+    parser.add_argument('--raw_semantic_score_alpha', type=float, default=0.0,
+                        help="weight of fixed raw semantic cosine scores")
     parser.add_argument('--semantic_cl_weight', type=float, default=0.0,
                         help="weight of semantic collaborative contrastive alignment loss")
     parser.add_argument('--semantic_cl_tau', type=float, default=0.2,
                         help="temperature for semantic collaborative contrastive alignment")
     parser.add_argument('--pop_score_alpha', type=float, default=0.0,
                         help="weight of train-set item popularity prior in ranking scores")
+    parser.add_argument('--neighbor_score_alpha', type=float, default=0.0,
+                        help="weight of semantic item-neighbor score diffusion during ranking")
+    parser.add_argument('--simgcl_weight', type=float, default=0.0,
+                        help="weight of SimGCL-style graph contrastive loss")
+    parser.add_argument('--simgcl_tau', type=float, default=0.2,
+                        help="temperature for SimGCL-style graph contrastive loss")
+    parser.add_argument('--simgcl_eps', type=float, default=0.1,
+                        help="embedding perturbation magnitude for SimGCL-style views")
+    parser.add_argument('--simgcl_start_epoch', type=int, default=0,
+                        help="first epoch to apply SimGCL-style graph contrastive loss")
+    parser.add_argument('--simgcl_stop_epoch', type=int, default=-1,
+                        help="disable SimGCL-style graph contrastive loss from this epoch; -1 keeps it enabled")
+    parser.add_argument('--hard_neg_k', type=int, default=1,
+                        help="number of sampled negative candidates for dynamic hard negative mining")
+    parser.add_argument('--hard_neg_start_epoch', type=int, default=0,
+                        help="first epoch to apply dynamic hard negative mining")
+    parser.add_argument('--hard_neg_stop_epoch', type=int, default=-1,
+                        help="disable dynamic hard negative mining from this epoch; -1 keeps it enabled")
     parser.add_argument('--a_fold', type=int,default=100,
                         help="the fold num used to split large adj matrix")
     parser.add_argument('--testbatch', type=int,default=100,

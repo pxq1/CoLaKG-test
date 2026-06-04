@@ -53,6 +53,14 @@ def parse_args():
                         help="weight of semantic item-neighbor score diffusion during ranking")
     parser.add_argument('--neighbor_score_steps', type=int, default=1,
                         help="number of semantic-neighbor diffusion steps for ranking scores")
+    parser.add_argument('--neighbor_score_mutual', type=int, default=0,
+                        help="use only mutual semantic nearest neighbors for score diffusion")
+    parser.add_argument('--neighbor_train_alpha', type=float, default=0.0,
+                        help="weight of semantic-neighbor item embeddings in BPR positive/negative scores")
+    parser.add_argument('--cf_score_alpha', type=float, default=0.0,
+                        help="weight of train-interaction item-item collaborative score diffusion during ranking")
+    parser.add_argument('--cf_neighbor_k', type=int, default=20,
+                        help="number of item-item collaborative neighbors for score diffusion")
     parser.add_argument('--simgcl_weight', type=float, default=0.0,
                         help="weight of SimGCL-style graph contrastive loss")
     parser.add_argument('--simgcl_tau', type=float, default=0.2,

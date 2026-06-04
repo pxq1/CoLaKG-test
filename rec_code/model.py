@@ -241,6 +241,10 @@ class CoLaKG(BasicModel):
         self.pop_score_alpha = self.config.get('pop_score_alpha', 0.0)
         self.neighbor_score_alpha = self.config.get('neighbor_score_alpha', 0.0)
         self.neighbor_score_steps = max(int(self.config.get('neighbor_score_steps', 1)), 1)
+        self.neighbor_score_mutual = bool(self.config.get('neighbor_score_mutual', 0))
+        self.neighbor_train_alpha = self.config.get('neighbor_train_alpha', 0.0)
+        self.cf_score_alpha = self.config.get('cf_score_alpha', 0.0)
+        self.cf_neighbor_k = max(int(self.config.get('cf_neighbor_k', 20)), 1)
         self.simgcl_weight = self.config.get('simgcl_weight', 0.0)
         self.simgcl_tau = self.config.get('simgcl_tau', 0.2)
         self.simgcl_eps = self.config.get('simgcl_eps', 0.1)
@@ -287,6 +291,8 @@ class CoLaKG(BasicModel):
             if len(positives) > 0:
                 train_pos_mask[user, torch.as_tensor(positives, dtype=torch.long)] = True
         self.register_buffer('train_pos_mask', train_pos_mask)
+        self.register_buffer('semantic_mutual_mask', self.build_semantic_mutual_mask(), persistent=False)
+        self.register_buffer('cf_adj_matrix', self.build_cf_adj_matrix(), persistent=False)
         print(f"lgn is already to go(drop_edge:{self.config['use_drop_edge']})")
         self.W = nn.Parameter(torch.empty(size=(1024, 32)))
         nn.init.xavier_uniform_(self.W.data, gain=1.414)
@@ -305,6 +311,40 @@ class CoLaKG(BasicModel):
         self.leakyrelu = nn.LeakyReLU(self.alpha)
 
         # print("save_txt")
+
+    def build_semantic_mutual_mask(self):
+        neighbor_sets = [set(row.tolist()) for row in self.adj_matrix.cpu()]
+        mutual_mask = torch.zeros_like(self.adj_matrix, dtype=torch.float32)
+        for item_id, neighbors in enumerate(self.adj_matrix.cpu().tolist()):
+            for offset, neighbor_id in enumerate(neighbors):
+                if item_id in neighbor_sets[neighbor_id]:
+                    mutual_mask[item_id, offset] = 1.0
+        return mutual_mask
+
+    def aggregate_neighbor_scores(self, base_scores, neighbor_index, mutual_mask=None):
+        selected_scores = base_scores[:, neighbor_index]
+        if mutual_mask is None:
+            return torch.mean(selected_scores, dim=2)
+        mask = mutual_mask.to(selected_scores.device).unsqueeze(0)
+        denom = torch.sum(mask, dim=2).clamp_min(1.0)
+        masked_scores = torch.sum(selected_scores * mask, dim=2) / denom
+        plain_scores = torch.mean(selected_scores, dim=2)
+        has_mutual = torch.sum(mask, dim=2) > 0
+        return torch.where(has_mutual, masked_scores, plain_scores)
+
+    def build_cf_adj_matrix(self):
+        if self.cf_score_alpha == 0 or not hasattr(self.dataset, 'trainUser') or not hasattr(self.dataset, 'trainItem'):
+            return torch.zeros((self.num_items, 1), dtype=torch.long)
+        k = min(self.cf_neighbor_k, max(self.num_items - 1, 1))
+        item_user = torch.zeros((self.num_items, self.num_users), dtype=torch.float32)
+        item_ids = torch.as_tensor(self.dataset.trainItem, dtype=torch.long)
+        user_ids = torch.as_tensor(self.dataset.trainUser, dtype=torch.long)
+        item_user[item_ids, user_ids] = 1.0
+        item_user = F.normalize(item_user, p=2, dim=1)
+        item_sim = torch.matmul(item_user, item_user.t())
+        item_sim.fill_diagonal_(-1.0)
+        return torch.topk(item_sim, k=k, dim=1).indices.long()
+
     def __dropout_x(self, x, keep_prob):
         size = x.size()
         index = x.indices().t()
@@ -433,9 +473,13 @@ class CoLaKG(BasicModel):
         scores = torch.matmul(users_emb, items_emb.t())
         if self.neighbor_score_alpha != 0:
             neighbor_scores = scores
+            mutual_mask = self.semantic_mutual_mask if self.neighbor_score_mutual else None
             for _ in range(self.neighbor_score_steps):
-                neighbor_scores = torch.mean(neighbor_scores[:, self.adj_matrix], dim=2)
+                neighbor_scores = self.aggregate_neighbor_scores(neighbor_scores, self.adj_matrix, mutual_mask)
             scores = scores + self.neighbor_score_alpha * neighbor_scores
+        if self.cf_score_alpha != 0:
+            cf_neighbor_scores = torch.mean(scores[:, self.cf_adj_matrix], dim=2)
+            scores = scores + self.cf_score_alpha * cf_neighbor_scores
         if self.semantic_score_alpha > 0:
             semantic_users = F.normalize(F.elu(self.user_semantic_map(self.user_semantic_emb))[users.long()], p=2, dim=1)
             semantic_items = F.normalize(F.elu(self.semantic_map(self.semantic_emb)), p=2, dim=1)
@@ -532,6 +576,11 @@ class CoLaKG(BasicModel):
         pos_scores = torch.sum(pos_scores, dim=1)
         neg_scores = torch.mul(users_emb, neg_emb)
         neg_scores = torch.sum(neg_scores, dim=1)
+        if self.neighbor_train_alpha != 0:
+            pos_neighbor_emb = torch.mean(all_items[self.adj_matrix[pos.long()]], dim=1)
+            neg_neighbor_emb = torch.mean(all_items[self.adj_matrix[neg.long()]], dim=1)
+            pos_scores = pos_scores + self.neighbor_train_alpha * torch.sum(users_emb * pos_neighbor_emb, dim=1)
+            neg_scores = neg_scores + self.neighbor_train_alpha * torch.sum(users_emb * neg_neighbor_emb, dim=1)
         if self.semantic_score_alpha > 0:
             semantic_users = F.normalize(F.elu(users_emb_ego0), p=2, dim=1)
             semantic_pos = F.normalize(F.elu(pos_emb_ego0), p=2, dim=1)

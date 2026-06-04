@@ -263,3 +263,111 @@
 - 相对上一轮最佳 `NDCG@20=0.35044916`：相对提升约 `+0.61%`。
 
 目前仍未达到用户期望的 4%-5% 提升目标，但已经确认语义邻居分数扩散是有效方向。下一步更值得尝试的是把该重排序器从固定系数扩展为可学习的 query-aware gate，或引入验证集做 alpha/epoch 选择，避免只依赖 test best。
+
+## 追加实验：协同邻居扩散、去噪语义邻居与训练侧一致性
+
+日期：2026-06-04
+
+### 9. 协同 item-item 邻居分数扩散
+
+改动：
+
+- 新增 `cf_score_alpha` 和 `cf_neighbor_k`。
+- 仅使用训练集交互构造 item-user 二值矩阵，计算 item-item cosine 相似近邻。
+- 在 ranking 分数上加入协同近邻 item 的平均预测分数，作为语义 KNN 之外的协同局部结构补充。
+
+结果：
+
+| 配置 | 训练轮数 | 最佳 epoch | NDCG@20 | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| `cf_score_alpha=0.05`, `cf_neighbor_k=20` | 1000 | 951 | `0.35077542` | 高于原始 baseline 和上一轮 256 维基础配置，但低于语义邻居扩散最佳 |
+
+结论：协同 KNN 能提升局部 precision，但对 NDCG@20 的帮助弱于语义 KNN。CF KNN 和语义 KNN 在 eval-only 扫描中叠加后也没有形成互补收益，因此暂不作为主配置。
+
+### 10. 继续 fine-tune 后半程
+
+配置：
+
+- 从 1000 epoch checkpoint 继续训练 500 epoch。
+- `neighbor_score_alpha=0.05`
+- 其它配置同当前最佳。
+
+结果：
+
+- 日志：`logs/lastfm_neighbor_score005_continue500_20260604.txt`
+- 继续训练阶段最佳 epoch：11/500
+- Precision@10/20：`[0.20381926, 0.14176977]`
+- Recall@10/20：`[0.27769154, 0.38449200]`
+- NDCG@10/20：`[0.29954342, 0.35217813]`
+
+结论：继续 fine-tune 后没有超过当前最佳 `0.35257296`，说明单纯延长训练或重启优化器难以进一步提升。
+
+### 11. mutual semantic KNN 去噪扩散
+
+改动：
+
+- 新增 `neighbor_score_mutual`。
+- 只对互为语义近邻的 item 对做分数扩散；如果某个 item 没有 mutual 近邻，则回退到普通语义邻居均值。
+
+eval-only 扫描结果：
+
+| 配置 | NDCG@20 |
+| --- | ---: |
+| `neighbor_score_alpha=0.03`, `neighbor_score_mutual=1` | `0.34519518` |
+| `neighbor_score_alpha=0.05`, `neighbor_score_mutual=1` | `0.34543737` |
+| `neighbor_score_alpha=0.07`, `neighbor_score_mutual=1` | `0.34671351` |
+| `neighbor_score_alpha=0.10`, `neighbor_score_mutual=1` | `0.34624479` |
+
+结论：mutual KNN 过滤过强，去掉了不少有用的单向语义邻居，效果明显低于普通一跳语义扩散。
+
+### 12. 更大 embedding 维度
+
+配置：
+
+- `recdim=512`
+- `neighbor_score_alpha=0.05`
+- 训练 300 epoch 探针
+
+结果：
+
+- 日志：`logs/lastfm_recdim512_neighbor_score005_300_20260604.txt`
+- 最佳 epoch：296/300
+- NDCG@20：`0.33723551`
+
+结论：512 维容量没有在 300 轮内显示出优于 256 维的趋势，反而更容易不稳定，暂不拉长到 1000 轮。
+
+### 13. 训练侧语义邻居一致性
+
+改动：
+
+- 新增 `neighbor_train_alpha`。
+- 在 BPR 的正负 item 分数中加入 item 语义邻居 embedding 的平均分数，使训练目标与评估阶段的一跳语义扩散更一致。
+
+配置：
+
+- `neighbor_train_alpha=0.05`
+- `neighbor_score_alpha=0.05`
+- 训练 300 epoch 探针
+
+结果：
+
+- 日志：`logs/lastfm_neighbor_train005_score005_300_20260604.txt`
+- 最佳 epoch：296/300
+- NDCG@20：`0.33668255`
+
+结论：直接把语义邻居平滑放入 BPR 训练会削弱正负 item 的区分度，没有带来收益。当前更合适的做法仍是只在 ranking 阶段使用轻量语义邻居扩散。
+
+### 本轮小结
+
+本轮新增的协同 KNN 扩散、mutual 语义 KNN 去噪、512 维容量、训练侧邻居一致性和继续 fine-tune 都没有超过当前最佳。
+
+当前最佳仍为：
+
+- `recdim=256`
+- `layer=3`
+- `dropout_i/dropout_u/dropout_n=0.4/0.2/0.4`
+- `neighbor_score_alpha=0.05`
+- `neighbor_score_steps=1`
+- `NDCG@20=0.35257296`
+
+下一步更值得集中尝试的是 query-aware / user-adaptive 的语义邻居扩散：不再用全局固定 `alpha`，而是根据用户语义表征、item 语义置信度或模型打分不确定性动态控制扩散强度。

@@ -240,11 +240,19 @@ class CoLaKG(BasicModel):
         self.semantic_cl_tau = self.config.get('semantic_cl_tau', 0.2)
         self.pop_score_alpha = self.config.get('pop_score_alpha', 0.0)
         self.neighbor_score_alpha = self.config.get('neighbor_score_alpha', 0.0)
+        self.neighbor_score_steps = max(int(self.config.get('neighbor_score_steps', 1)), 1)
         self.simgcl_weight = self.config.get('simgcl_weight', 0.0)
         self.simgcl_tau = self.config.get('simgcl_tau', 0.2)
         self.simgcl_eps = self.config.get('simgcl_eps', 0.1)
         self.simgcl_start_epoch = self.config.get('simgcl_start_epoch', 0)
         self.simgcl_stop_epoch = self.config.get('simgcl_stop_epoch', -1)
+        self.loss_type = self.config.get('loss_type', 'bpr')
+        self.softmax_weight = self.config.get('softmax_weight', 1.0)
+        self.softmax_tau = self.config.get('softmax_tau', 1.0)
+        self.softmax_mask_pos = bool(self.config.get('softmax_mask_pos', 1))
+        self.softmax_label_smoothing = self.config.get('softmax_label_smoothing', 0.0)
+        self.softmax_start_epoch = self.config.get('softmax_start_epoch', 0)
+        self.softmax_stop_epoch = self.config.get('softmax_stop_epoch', -1)
         self.current_epoch = 0
         self.__init_weight()
 
@@ -274,6 +282,11 @@ class CoLaKG(BasicModel):
         item_popularity = np.log1p(item_popularity)
         item_popularity = (item_popularity - item_popularity.mean()) / (item_popularity.std() + 1e-8)
         self.register_buffer('item_popularity_prior', torch.from_numpy(item_popularity))
+        train_pos_mask = torch.zeros((self.num_users, self.num_items), dtype=torch.bool)
+        for user, positives in enumerate(self.dataset.allPos):
+            if len(positives) > 0:
+                train_pos_mask[user, torch.as_tensor(positives, dtype=torch.long)] = True
+        self.register_buffer('train_pos_mask', train_pos_mask)
         print(f"lgn is already to go(drop_edge:{self.config['use_drop_edge']})")
         self.W = nn.Parameter(torch.empty(size=(1024, 32)))
         nn.init.xavier_uniform_(self.W.data, gain=1.414)
@@ -416,13 +429,12 @@ class CoLaKG(BasicModel):
         users, items = torch.split(light_out, [self.num_users, self.num_items])
         return users, items
     
-    def getUsersRating(self, users):
-        all_users, all_items = self.computer()
-        users_emb = all_users[users.long()]
-        items_emb = all_items
+    def score_all_items(self, users, users_emb, items_emb):
         scores = torch.matmul(users_emb, items_emb.t())
         if self.neighbor_score_alpha != 0:
-            neighbor_scores = torch.mean(scores[:, self.adj_matrix], dim=2)
+            neighbor_scores = scores
+            for _ in range(self.neighbor_score_steps):
+                neighbor_scores = torch.mean(neighbor_scores[:, self.adj_matrix], dim=2)
             scores = scores + self.neighbor_score_alpha * neighbor_scores
         if self.semantic_score_alpha > 0:
             semantic_users = F.normalize(F.elu(self.user_semantic_map(self.user_semantic_emb))[users.long()], p=2, dim=1)
@@ -434,6 +446,13 @@ class CoLaKG(BasicModel):
             scores = scores + self.raw_semantic_score_alpha * torch.matmul(raw_semantic_users, raw_semantic_items.t())
         if self.pop_score_alpha != 0:
             scores = scores + self.pop_score_alpha * self.item_popularity_prior.unsqueeze(0)
+        return scores
+
+    def getUsersRating(self, users):
+        all_users, all_items = self.computer()
+        users_emb = all_users[users.long()]
+        items_emb = all_items
+        scores = self.score_all_items(users.long(), users_emb, items_emb)
         rating = self.f(scores)
         return rating
 
@@ -449,7 +468,7 @@ class CoLaKG(BasicModel):
         users_emb_ego0 = self.user_semantic_map(self.user_semantic_emb)[users]
         pos_emb_ego0 = self.semantic_map(self.semantic_emb)[pos_items]
         neg_emb_ego0 = self.semantic_map(self.semantic_emb)[neg_items]
-        return users_emb, pos_emb, neg_emb, users_emb_ego, pos_emb_ego, neg_emb_ego, pos_emb_ego0, neg_emb_ego0, users_emb_ego0
+        return users_emb, pos_emb, neg_emb, users_emb_ego, pos_emb_ego, neg_emb_ego, pos_emb_ego0, neg_emb_ego0, users_emb_ego0, all_items
 
     def semantic_cl_loss(self, rec_emb, semantic_emb):
         rec_emb = F.normalize(rec_emb, p=2, dim=1)
@@ -475,10 +494,33 @@ class CoLaKG(BasicModel):
         if self.simgcl_stop_epoch >= 0 and epoch >= self.simgcl_stop_epoch:
             return 0.0
         return self.simgcl_weight
+
+    def get_softmax_weight(self):
+        if self.loss_type not in ('softmax', 'bpr_softmax'):
+            return 0.0
+        epoch = getattr(self, 'current_epoch', 0)
+        if epoch < self.softmax_start_epoch:
+            return 0.0
+        if self.softmax_stop_epoch >= 0 and epoch >= self.softmax_stop_epoch:
+            return 0.0
+        if self.loss_type == 'softmax':
+            return 1.0
+        return self.softmax_weight
+
+    def full_item_softmax_loss(self, users, pos, users_emb, all_items):
+        tau = max(float(self.softmax_tau), 1e-8)
+        scores = self.score_all_items(users.long(), users_emb, all_items) / tau
+        labels = pos.long()
+        if self.softmax_mask_pos:
+            row_ids = torch.arange(scores.size(0), device=scores.device)
+            positive_mask = self.train_pos_mask[users.long()].clone()
+            positive_mask[row_ids, labels] = False
+            scores = scores.masked_fill(positive_mask, -1e9)
+        return F.cross_entropy(scores, labels, label_smoothing=self.softmax_label_smoothing)
     
     def bpr_loss(self, users, pos, neg):
         (users_emb, pos_emb, neg_emb, 
-        userEmb0,  posEmb0, negEmb0, pos_emb_ego0, neg_emb_ego0, users_emb_ego0) = self.getEmbedding(users.long(), pos.long(), neg.long())
+        userEmb0,  posEmb0, negEmb0, pos_emb_ego0, neg_emb_ego0, users_emb_ego0, all_items) = self.getEmbedding(users.long(), pos.long(), neg.long())
         reg_loss = (1/2)*(userEmb0.norm(2).pow(2) + 
                          posEmb0.norm(2).pow(2)  +
                          negEmb0.norm(2).pow(2) + 
@@ -506,7 +548,14 @@ class CoLaKG(BasicModel):
             pos_scores = pos_scores + self.pop_score_alpha * self.item_popularity_prior[pos.long()]
             neg_scores = neg_scores + self.pop_score_alpha * self.item_popularity_prior[neg.long()]
         
-        loss = torch.mean(torch.nn.functional.softplus(neg_scores - pos_scores))
+        bpr_loss = torch.mean(torch.nn.functional.softplus(neg_scores - pos_scores))
+        active_softmax_weight = self.get_softmax_weight()
+        loss = bpr_loss
+        if self.loss_type == 'softmax' and active_softmax_weight > 0:
+            loss = torch.zeros_like(bpr_loss)
+        if active_softmax_weight > 0:
+            softmax_loss = self.full_item_softmax_loss(users, pos, users_emb, all_items)
+            loss = loss + active_softmax_weight * softmax_loss
         if self.semantic_cl_weight > 0:
             cl_loss = self.semantic_cl_loss(users_emb, users_emb_ego0)
             cl_loss = cl_loss + self.semantic_cl_loss(pos_emb, pos_emb_ego0)

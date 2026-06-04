@@ -120,6 +120,24 @@ def format_best_test_records():
             )
     return lines
 
+if world.EVAL_ONLY:
+    cprint("[EVAL ONLY]")
+    test_results = Procedure.Test(dataset, Recmodel, 0, w, world.config['multicore'])
+    update_best_test_records(test_results, 1)
+    log_message = f'EVAL ONLY RESULTS: {test_results}'
+    print(log_message)
+    with open(log_file, "a") as f:
+        f.write(log_message + "\n")
+    final_messages = format_best_test_records()
+    for message in final_messages:
+        print(message)
+    with open(log_file, "a") as f:
+        for message in final_messages:
+            f.write(message + "\n")
+    if world.tensorboard:
+        w.close()
+    raise SystemExit(0)
+
 try:
     for epoch in range(world.TRAIN_epochs):
         start = time.time()

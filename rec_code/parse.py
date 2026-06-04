@@ -51,6 +51,8 @@ def parse_args():
                         help="weight of train-set item popularity prior in ranking scores")
     parser.add_argument('--neighbor_score_alpha', type=float, default=0.0,
                         help="weight of semantic item-neighbor score diffusion during ranking")
+    parser.add_argument('--neighbor_score_steps', type=int, default=1,
+                        help="number of semantic-neighbor diffusion steps for ranking scores")
     parser.add_argument('--simgcl_weight', type=float, default=0.0,
                         help="weight of SimGCL-style graph contrastive loss")
     parser.add_argument('--simgcl_tau', type=float, default=0.2,
@@ -67,6 +69,21 @@ def parse_args():
                         help="first epoch to apply dynamic hard negative mining")
     parser.add_argument('--hard_neg_stop_epoch', type=int, default=-1,
                         help="disable dynamic hard negative mining from this epoch; -1 keeps it enabled")
+    parser.add_argument('--loss_type', type=str, default='bpr',
+                        choices=['bpr', 'softmax', 'bpr_softmax'],
+                        help="training objective: BPR, full-item softmax, or their combination")
+    parser.add_argument('--softmax_weight', type=float, default=1.0,
+                        help="weight of the full-item softmax loss when loss_type is bpr_softmax")
+    parser.add_argument('--softmax_tau', type=float, default=1.0,
+                        help="temperature for full-item softmax logits")
+    parser.add_argument('--softmax_mask_pos', type=int, default=1,
+                        help="mask a user's other train positives from full-item softmax negatives")
+    parser.add_argument('--softmax_label_smoothing', type=float, default=0.0,
+                        help="label smoothing for full-item softmax loss")
+    parser.add_argument('--softmax_start_epoch', type=int, default=0,
+                        help="first epoch to apply full-item softmax loss")
+    parser.add_argument('--softmax_stop_epoch', type=int, default=-1,
+                        help="disable full-item softmax loss from this epoch; -1 keeps it enabled")
     parser.add_argument('--a_fold', type=int,default=100,
                         help="the fold num used to split large adj matrix")
     parser.add_argument('--testbatch', type=int,default=100,
@@ -85,6 +102,8 @@ def parse_args():
                         help="enable tensorboard")
     parser.add_argument('--comment', type=str,default="lgn")
     parser.add_argument('--load', type=int,default=0)
+    parser.add_argument('--eval_only', type=int, default=0,
+                        help="load weights and run one test pass without training or saving")
     parser.add_argument('--epochs', type=int,default=1000)
     parser.add_argument('--multicore', type=int, default=0, help='whether we use multiprocessing or not in test')
     parser.add_argument('--pretrain', type=int, default=0, help='whether we use pretrained weight or not')

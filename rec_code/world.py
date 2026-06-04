@@ -54,6 +54,7 @@ config['semantic_cl_weight'] = args.semantic_cl_weight
 config['semantic_cl_tau'] = args.semantic_cl_tau
 config['pop_score_alpha'] = args.pop_score_alpha
 config['neighbor_score_alpha'] = args.neighbor_score_alpha
+config['neighbor_score_steps'] = args.neighbor_score_steps
 config['simgcl_weight'] = args.simgcl_weight
 config['simgcl_tau'] = args.simgcl_tau
 config['simgcl_eps'] = args.simgcl_eps
@@ -62,6 +63,13 @@ config['simgcl_stop_epoch'] = args.simgcl_stop_epoch
 config['hard_neg_k'] = args.hard_neg_k
 config['hard_neg_start_epoch'] = args.hard_neg_start_epoch
 config['hard_neg_stop_epoch'] = args.hard_neg_stop_epoch
+config['loss_type'] = args.loss_type
+config['softmax_weight'] = args.softmax_weight
+config['softmax_tau'] = args.softmax_tau
+config['softmax_mask_pos'] = args.softmax_mask_pos
+config['softmax_label_smoothing'] = args.softmax_label_smoothing
+config['softmax_start_epoch'] = args.softmax_start_epoch
+config['softmax_stop_epoch'] = args.softmax_stop_epoch
 
 
 GPU = torch.cuda.is_available()
@@ -82,6 +90,7 @@ user_semantic_emb_file = args.user_semantic_emb_file
 
 TRAIN_epochs = args.epochs
 LOAD = args.load
+EVAL_ONLY = bool(args.eval_only)
 PATH = args.path
 topks = eval(args.topks)
 tensorboard = args.tensorboard

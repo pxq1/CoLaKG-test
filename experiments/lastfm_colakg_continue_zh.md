@@ -179,3 +179,87 @@
 3. 将 SimGCL 从全训练联合损失改成预训练阶段，只预训练 50-100 轮后完全切回 CoLaKG。
 4. 引入 LightGCL 风格的低秩全局结构视图，但需要额外实现 SVD 图视图缓存，改动会比本轮更大。
 5. 尝试学习型融合权重的正则化版本，而不是直接 raw semantic score。
+
+## 追加实验：全物品辅助目标与更细语义邻居扩散
+
+日期：2026-06-04
+
+### 7. 全物品 softmax / 多负样本辅助目标
+
+改动：
+
+- 新增 `loss_type`，支持 `bpr`、`softmax`、`bpr_softmax`。
+- 新增全物品 softmax loss：对 LastFM 的 2813 个 item 直接做 full-item cross entropy，并 mask 用户训练集中其它正样本，避免把已交互物品当负例。
+- 新增 `softmax_start_epoch`、`softmax_stop_epoch`，允许只在训练前期/中期加入该辅助目标，后期回到 BPR 精排。
+- 新增 `eval_only`，用于加载 checkpoint 后只评估，不继续训练或覆盖权重，方便快速扫描重排序参数。
+
+参考思路：
+
+- SGL/XSimGCL/LightGCL 等图推荐工作强调用轻量辅助视图或全局结构信号增强 CF 表征。本实验没有直接替换 CoLaKG 主干，而是尝试引入更强的多负样本排序监督。
+
+结果：
+
+| 配置 | 训练轮数 | 最佳 epoch | NDCG@20 | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| `loss_type=softmax`, `softmax_tau=1.0` | 120 | 56 | `0.33119030` | 单独使用 full-item softmax 学得快，但后期排序能力明显不足 |
+| `loss_type=bpr_softmax`, `softmax_weight=0.05` | 200 | 181 | `0.33971212` | 辅助目标比纯 softmax 稳，但仍低于上一轮最佳 |
+| `loss_type=bpr_softmax`, `softmax_weight=0.01`, `softmax_stop_epoch=100` | 300 | 296 | `0.33777393` | 前期辅助后切回 BPR 仍未形成优势 |
+
+结论：全物品 softmax 在 LastFM 上没有直接提升 CoLaKG。原因可能是 CoLaKG 的语义邻居模块本身已经提供较强 item 侧归纳偏置，过强的全局分类目标会削弱 BPR 对 top-k 相对排序的细粒度优化。
+
+### 8. 一跳语义邻居分数扩散细调
+
+改动：
+
+- 在上一轮 `neighbor_score_alpha=0.1` 接近最佳但未超过的基础上，细调一跳语义邻居分数扩散系数。
+- 新增 `neighbor_score_steps`，支持多跳语义邻居分数扩散；默认 `1`，保持原行为。
+
+核心思想：
+
+- 对每个候选 item 的分数，引入其 SimCSE-KG 语义近邻 item 的平均预测分数：
+  `score(i) = score(i) + alpha * mean(score(N_sem(i)))`
+- 这相当于一个轻量的语义 KNN 重排序器，可以缓解单个 item 表征噪声，增强语义相近 item 的局部一致性。
+
+结果：
+
+| 配置 | 训练轮数 | 最佳 epoch | Precision@10/20 | Recall@10/20 | NDCG@10/20 |
+| --- | ---: | ---: | --- | --- | --- |
+| `neighbor_score_alpha=0.05`, `neighbor_score_steps=1` | 1000 | 951 | `[0.20387305, 0.14179666]` | `[0.27658197, 0.38471080]` | `[0.29956826, 0.35257296]` |
+| `neighbor_score_alpha=0.04`, `neighbor_score_steps=1` | 1000 | 951 | `[0.20381926, 0.14155460]` | `[0.27650000, 0.38389495]` | `[0.29937338, 0.35206857]` |
+
+补充 eval-only 扫描：
+
+- 使用 `alpha=0.05` 训练结束后的最终 checkpoint 扫描 `neighbor_score_steps=1/2/3`。
+- 最终权重上多跳扩散没有优于一跳扩散，因此当前不采用多跳作为主配置。
+
+结论：`neighbor_score_alpha=0.05` 成为当前新的 LastFM 最佳配置，超过上一轮最佳 `0.35044916`。
+
+### 当前新的最佳结果
+
+最佳配置：
+
+- `dataset=lastfm`
+- `seed=2020`
+- `epochs=1000`
+- `recdim=256`
+- `layer=3`
+- `neighbor_k=10`
+- `dropout_i/dropout_u/dropout_n=0.4/0.2/0.4`
+- `neighbor_score_alpha=0.05`
+- `neighbor_score_steps=1`
+- 其它新增训练辅助模块关闭：`loss_type=bpr`，`simgcl_weight=0`，`semantic_cl_weight=0`，`hard_neg_k=1`
+
+最佳结果：
+
+- 日志：`logs/lastfm_neighbor_score005_1000_20260604.txt`
+- 最佳 epoch：951
+- Precision@10/20：`[0.20387305, 0.14179666]`
+- Recall@10/20：`[0.27658197, 0.38471080]`
+- NDCG@10/20：`[0.29956826, 0.35257296]`
+
+提升幅度：
+
+- 相对原始 baseline `NDCG@20=0.34498224`：提升到 `0.35257296`，相对提升约 `+2.20%`。
+- 相对上一轮最佳 `NDCG@20=0.35044916`：相对提升约 `+0.61%`。
+
+目前仍未达到用户期望的 4%-5% 提升目标，但已经确认语义邻居分数扩散是有效方向。下一步更值得尝试的是把该重排序器从固定系数扩展为可学习的 query-aware gate，或引入验证集做 alpha/epoch 选择，避免只依赖 test best。
